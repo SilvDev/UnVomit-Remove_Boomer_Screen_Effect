@@ -1,6 +1,6 @@
 /*
 *	UnVomit - Remove Boomer Screen Effect
-*	Copyright (C) 2021 Silvers
+*	Copyright (C) 2022 Silvers
 *
 *	This program is free software: you can redistribute it and/or modify
 *	it under the terms of the GNU General Public License as published by
@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"1.6"
+#define PLUGIN_VERSION 		"1.7"
 
 /*======================================================================================
 	Plugin Info:
@@ -31,6 +31,9 @@
 
 ========================================================================================
 	Change Log:
+
+1.7 (20-Jun-2022)
+	- Fixed the glow not removing on player death. Thanks to "hefiwhfcds2" for reporting.
 
 1.6 (14-Nov-2021)
 	- Changes to fix warnings when compiling on SourceMod 1.11.
@@ -133,8 +136,8 @@ public void OnPluginStart()
 	g_hCvarParticle =		CreateConVar(	"l4d_unvomit_particle",			"0.0",				"0.0=Instant. Duration of the particle effect (game default: 10.0). How long to keep the on-screen green effect enabled.", CVAR_FLAGS );
 	if( g_bLeft4Dead2 )
 	{
-		g_hCvarGlowC =		CreateConVar(	"l4d_unvomit_glow_color",		"255 100 0",		"0=Off. L4D2 only: glow outline on players until vomit reset time. Three values between 0-255 separated by spaces. RGB: Red Green Blue.", CVAR_FLAGS );
-		g_hCvarGlowV =		CreateConVar(	"l4d_unvomit_glow_versus",		"201 18 184",		"0=Off. L4D2 only: glow outline in Versus gamemode. Displays the same color to both teams.", CVAR_FLAGS );
+		g_hCvarGlowC =		CreateConVar(	"l4d_unvomit_glow_color",		"255 102 0",		"0=Off. L4D2 only: glow outline on players until vomit reset time. Three values between 0-255 separated by spaces. RGB: Red Green Blue.", CVAR_FLAGS );
+		g_hCvarGlowV =		CreateConVar(	"l4d_unvomit_glow_versus",		"201 17 183",		"0=Off. L4D2 only: glow outline in Versus gamemode. Displays the same color to both teams.", CVAR_FLAGS );
 	}
 	g_hCvarModes =			CreateConVar(	"l4d_unvomit_modes",			"",					"Turn on the plugin in these game modes, separate by commas (no spaces). (Empty = all).", CVAR_FLAGS );
 	g_hCvarModesOff =		CreateConVar(	"l4d_unvomit_modes_off",		"",					"Turn off the plugin in these game modes, separate by commas (no spaces). (Empty = none).", CVAR_FLAGS );
@@ -192,12 +195,12 @@ public void OnConfigsExecuted()
 	IsAllowed();
 }
 
-public void ConVarChanged_Allow(Handle convar, const char[] oldValue, const char[] newValue)
+void ConVarChanged_Allow(Handle convar, const char[] oldValue, const char[] newValue)
 {
 	IsAllowed();
 }
 
-public void ConVarChanged_Cvars(Handle convar, const char[] oldValue, const char[] newValue)
+void ConVarChanged_Cvars(Handle convar, const char[] oldValue, const char[] newValue)
 {
 	GetCvars();
 }
@@ -239,12 +242,16 @@ void IsAllowed()
 
 	if( g_bCvarAllow == false && bCvarAllow == true && bAllowMode == true )
 	{
+		if( g_bLeft4Dead2 )
+			HookEvent("player_death",		Event_PlayerDeath);
 		HookEvent("player_now_it",			Event_IsIt, EventHookMode_Pre);
 		g_bCvarAllow = true;
 	}
 
 	else if( g_bCvarAllow == true && (bCvarAllow == false || bAllowMode == false) )
 	{
+		if( g_bLeft4Dead2 )
+			UnhookEvent("player_death",		Event_PlayerDeath);
 		UnhookEvent("player_now_it",		Event_IsIt, EventHookMode_Pre);
 		g_bCvarAllow = false;
 	}
@@ -304,7 +311,7 @@ bool IsAllowedGameMode()
 	return true;
 }
 
-public void OnGamemode(const char[] output, int caller, int activator, float delay)
+void OnGamemode(const char[] output, int caller, int activator, float delay)
 {
 	if( strcmp(output, "OnCoop") == 0 )
 		g_iCurrentMode = 1;
@@ -321,13 +328,13 @@ public void OnGamemode(const char[] output, int caller, int activator, float del
 // ====================================================================================================
 //					COMMAND
 // ====================================================================================================
-public Action CmdVomit(int client, int args)
+Action CmdVomit(int client, int args)
 {
 	VomitCommand(client, args, false);
 	return Plugin_Handled;
 }
 
-public Action CmdUnVomit(int client, int args)
+Action CmdUnVomit(int client, int args)
 {
 	VomitCommand(client, args, true);
 	return Plugin_Handled;
@@ -401,7 +408,23 @@ Action Timer_Unvomit( Handle timer, int UserId )
 	return Plugin_Continue;
 }
 
-public Action Event_IsIt(Event event, const char[] name, bool dontBroadcast)
+Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
+{
+	int userid = event.GetInt("userid");
+	int client = GetClientOfUserId(userid);
+	if( client && (g_iCurrentMode == 4 ? g_iCvarGlowV : g_iCvarGlowC) )
+	{
+		if( GetEntProp(client, Prop_Send, "m_iGlowType") == 3 && GetEntProp(client, Prop_Send, "m_glowColorOverride") == (g_iCurrentMode == 4 ? g_iCvarGlowV : g_iCvarGlowC) )
+		{
+			SetEntProp(client, Prop_Send, "m_glowColorOverride", 0);
+			SetEntProp(client, Prop_Send, "m_iGlowType", 0);
+		}
+	}
+
+	return Plugin_Continue;
+}
+
+Action Event_IsIt(Event event, const char[] name, bool dontBroadcast)
 {
 	int userid = event.GetInt("userid");
 	int client = GetClientOfUserId(userid);
@@ -478,7 +501,7 @@ public Action Event_IsIt(Event event, const char[] name, bool dontBroadcast)
 	return Plugin_Continue;
 }
 
-public Action Timer_Reset(Handle timer, any userid)
+Action Timer_Reset(Handle timer, any userid)
 {
 	int client = GetClientOfUserId(userid);
 	if( client && IsClientInGame(client) )
@@ -486,9 +509,7 @@ public Action Timer_Reset(Handle timer, any userid)
 		// Glow
 		if( g_bLeft4Dead2 && g_iCurrentMode == 4 ? g_iCvarGlowV : g_iCvarGlowC )
 		{
-			if( GetEntProp(client, Prop_Send, "m_iGlowType") == 3 &&
-				GetEntProp(client, Prop_Send, "m_glowColorOverride") == (g_iCurrentMode == 4 ? g_iCvarGlowV : g_iCvarGlowC)
-			)
+			if( GetEntProp(client, Prop_Send, "m_iGlowType") == 3 && GetEntProp(client, Prop_Send, "m_glowColorOverride") == (g_iCurrentMode == 4 ? g_iCvarGlowV : g_iCvarGlowC) )
 			{
 				SetEntProp(client, Prop_Send, "m_glowColorOverride", 0);
 				SetEntProp(client, Prop_Send, "m_iGlowType", 0);
