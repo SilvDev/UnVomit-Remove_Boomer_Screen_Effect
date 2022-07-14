@@ -18,7 +18,7 @@
 
 
 
-#define PLUGIN_VERSION 		"1.7"
+#define PLUGIN_VERSION 		"1.8"
 
 /*======================================================================================
 	Plugin Info:
@@ -31,6 +31,9 @@
 
 ========================================================================================
 	Change Log:
+
+1.8 (14-Jul-2022)
+	- Fixed not removing the effect on players when taking over a bot who has been covered in vomit. Thanks to "hefiwhfcds2" for reporting.
 
 1.7 (20-Jun-2022)
 	- Fixed the glow not removing on player death. Thanks to "hefiwhfcds2" for reporting.
@@ -107,20 +110,20 @@ public void OnPluginStart()
 	// ====================================================================================================
 	// SDKCALLS
 	// ====================================================================================================
-	Handle hGameData = LoadGameConfigFile("l4d_unvomit");
-	if( hGameData == INVALID_HANDLE ) SetFailState("Failed to load gamedata: l4d_unvomit.txt");
+	GameData hGameData = new GameData("l4d_unvomit");
+	if( hGameData == null ) SetFailState("Failed to load gamedata: l4d_unvomit.txt");
 
 	StartPrepSDKCall(SDKCall_Player);
 	if( PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "CTerrorPlayer::OnVomitedUpon") == false ) SetFailState("Failed to find signature: CTerrorPlayer::OnVomitedUpon");
 	PrepSDKCall_AddParameter(SDKType_CBasePlayer, SDKPass_Pointer);
 	PrepSDKCall_AddParameter(SDKType_PlainOldData, SDKPass_Plain);
 	g_hSDKVomit = EndPrepSDKCall();
-	if( g_hSDKVomit == INVALID_HANDLE ) SetFailState("Failed to create SDKCall: CTerrorPlayer::OnVomitedUpon");
+	if( g_hSDKVomit == null ) SetFailState("Failed to create SDKCall: CTerrorPlayer::OnVomitedUpon");
 
 	StartPrepSDKCall(SDKCall_Player);
 	if( PrepSDKCall_SetFromConf(hGameData, SDKConf_Signature, "CTerrorPlayer::OnITExpired") == false ) SetFailState("Failed to find signature: CTerrorPlayer::OnITExpired");
 	g_hSDKUnVomit = EndPrepSDKCall();
-	if( g_hSDKUnVomit == INVALID_HANDLE ) SetFailState("Failed to create SDKCall: CTerrorPlayer::OnITExpired");
+	if( g_hSDKUnVomit == null ) SetFailState("Failed to create SDKCall: CTerrorPlayer::OnITExpired");
 
 	delete hGameData;
 
@@ -132,7 +135,7 @@ public void OnPluginStart()
 	g_hCvarAllow =			CreateConVar(	"l4d_unvomit_allow",			"1",				"0=Plugin off, 1=Plugin on.", CVAR_FLAGS );
 	g_hCvarChase =			CreateConVar(	"l4d_unvomit_chase",			"1",				"0=Off. 1=Attach a info_goal_infected_chase to players for common infected to chase them.", CVAR_FLAGS );
 	g_hCvarDuration =		CreateConVar(	"l4d_unvomit_duration",			"20",				"Duration of the effect (game default: 20). How long to keep the chase and glow enabled.", CVAR_FLAGS );
-	g_hCvarFlags =			CreateConVar(	"l4d_unvomit_flags",			"",					"Only users with these flags will be unvomited. Empty = allow  all players.", CVAR_FLAGS );
+	g_hCvarFlags =			CreateConVar(	"l4d_unvomit_flags",			"",					"Only users with these flags will be unvomited. Empty = allow all players.", CVAR_FLAGS );
 	g_hCvarParticle =		CreateConVar(	"l4d_unvomit_particle",			"0.0",				"0.0=Instant. Duration of the particle effect (game default: 10.0). How long to keep the on-screen green effect enabled.", CVAR_FLAGS );
 	if( g_bLeft4Dead2 )
 	{
@@ -243,16 +246,18 @@ void IsAllowed()
 	if( g_bCvarAllow == false && bCvarAllow == true && bAllowMode == true )
 	{
 		if( g_bLeft4Dead2 )
-			HookEvent("player_death",		Event_PlayerDeath);
-		HookEvent("player_now_it",			Event_IsIt, EventHookMode_Pre);
+			HookEvent("player_death",			Event_PlayerDeath);
+		HookEvent("player_now_it",				Event_IsIt, EventHookMode_Pre);
+		HookEvent("bot_player_replace",			Event_PlayerReplace);
 		g_bCvarAllow = true;
 	}
 
 	else if( g_bCvarAllow == true && (bCvarAllow == false || bAllowMode == false) )
 	{
 		if( g_bLeft4Dead2 )
-			UnhookEvent("player_death",		Event_PlayerDeath);
-		UnhookEvent("player_now_it",		Event_IsIt, EventHookMode_Pre);
+			UnhookEvent("player_death",			Event_PlayerDeath);
+		UnhookEvent("player_now_it",			Event_IsIt, EventHookMode_Pre);
+		UnhookEvent("bot_player_replace",		Event_PlayerReplace);
 		g_bCvarAllow = false;
 	}
 }
@@ -408,6 +413,28 @@ Action Timer_Unvomit( Handle timer, int UserId )
 	return Plugin_Continue;
 }
 
+void Event_PlayerReplace(Event event, const char[] name, bool dontBroadcast)
+{
+	int client = GetClientOfUserId(event.GetInt("player"));
+	if( client && IsClientInGame(client) )
+	{
+		if( GetEntPropFloat(client, Prop_Send, "m_vomitStart") + 20.0 >= GetGameTime() )
+		{
+			int bot = GetClientOfUserId(event.GetInt("bot"));
+
+			EventIsIt(client, 20.0 - (GetGameTime() - g_fLastVomit[bot]));
+
+			int entity = g_iChase[bot];
+			g_iChase[bot] = 0;
+
+			if( entity && EntRefToEntIndex(entity) != INVALID_ENT_REFERENCE )
+			{
+				RemoveEntity(entity);
+			}
+		}
+	}
+}
+
 Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast)
 {
 	int userid = event.GetInt("userid");
@@ -430,70 +457,81 @@ Action Event_IsIt(Event event, const char[] name, bool dontBroadcast)
 	int client = GetClientOfUserId(userid);
 	if( client && IsFakeClient(client) == false )
 	{
-		// Flags - specified users only
-		if( g_iCvarFlags != 0 )
-		{
-			int flags = GetUserFlagBits(client);
+		return EventIsIt(client, g_fCvarDuration);
+	}
+	else
+	{
+		g_fLastVomit[client] = GetGameTime();
+	}
 
-			if( !(flags & ADMFLAG_ROOT) && !(flags & g_iCvarFlags) )
+	return Plugin_Continue;
+}
+
+Action EventIsIt(int client, float time)
+{
+	// Flags - specified users only
+	if( g_iCvarFlags != 0 )
+	{
+		int flags = GetUserFlagBits(client);
+
+		if( !(flags & ADMFLAG_ROOT) && !(flags & g_iCvarFlags) )
+		{
+			return Plugin_Continue;
+		}
+	}
+
+	// Remove vomit
+	if( g_fCvarParticle )
+	{
+		CreateTimer(g_fCvarParticle, Timer_Unvomit, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+	} else {
+		SDKCall(g_hSDKUnVomit, client);
+	}
+
+	// Otherwise event fires over and over
+	if( GetGameTime() - g_fLastVomit[client] < time )
+	{
+		// Block event
+		return Plugin_Handled;
+	} else {
+		g_fLastVomit[client] = GetGameTime();
+
+		// Reset glow / fire event
+		CreateTimer(time, Timer_Reset, GetClientUserId(client));
+
+		// Glow
+		if ( g_bLeft4Dead2 )
+		{
+			int glow = g_iCurrentMode == 4 ? g_iCvarGlowV : g_iCvarGlowC;
+			if( glow )
 			{
-				return Plugin_Continue;
+				SetEntProp(client, Prop_Send, "m_iGlowType", 3);
+				SetEntProp(client, Prop_Send, "m_glowColorOverride", glow);
 			}
 		}
 
-		// Remove vomit
-		if( g_fCvarParticle )
+		// Chase
+		if( g_bCvarChase )
 		{
-			CreateTimer(g_fCvarParticle, Timer_Unvomit, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
-		} else {
-			SDKCall(g_hSDKUnVomit, client);
-		}
-
-		// Otherwise event fires over and over
-		if( GetGameTime() - g_fLastVomit[client] < g_fCvarDuration )
-		{
-			// Block event
-			return Plugin_Handled;
-		} else {
-			g_fLastVomit[client] = GetGameTime();
-
-			// Reset glow / fire event
-			CreateTimer(g_fCvarDuration, Timer_Reset, userid);
-
-			// Glow
-			if ( g_bLeft4Dead2 )
+			int entity = CreateEntityByName("info_goal_infected_chase");
+			if( entity != -1 )
 			{
-				int glow = g_iCurrentMode == 4 ? g_iCvarGlowV : g_iCvarGlowC;
-				if( glow )
-				{
-					SetEntProp(client, Prop_Send, "m_iGlowType", 3);
-					SetEntProp(client, Prop_Send, "m_glowColorOverride", glow);
-				}
-			}
+				g_iChase[client] = EntIndexToEntRef(entity);
 
-			// Chase
-			if( g_bCvarChase )
-			{
-				int entity = CreateEntityByName("info_goal_infected_chase");
-				if( entity != -1 )
-				{
-					g_iChase[client] = EntIndexToEntRef(entity);
+				DispatchSpawn(entity);
+				float vPos[3];
+				GetClientAbsOrigin(client, vPos);
+				vPos[2] += 20.0;
+				TeleportEntity(entity, vPos, NULL_VECTOR, NULL_VECTOR);
 
-					DispatchSpawn(entity);
-					float vPos[3];
-					GetClientAbsOrigin(client, vPos);
-					vPos[2] += 20.0;
-					TeleportEntity(entity, vPos, NULL_VECTOR, NULL_VECTOR);
+				SetVariantString("!activator");
+				AcceptEntityInput(entity, "SetParent", client);
 
-					SetVariantString("!activator");
-					AcceptEntityInput(entity, "SetParent", client);
-
-					static char temp[32];
-					Format(temp, sizeof temp, "OnUser4 !self:Kill::%f:-1", g_fCvarDuration);
-					SetVariantString(temp);
-					AcceptEntityInput(entity, "AddOutput");
-					AcceptEntityInput(entity, "FireUser4");
-				}
+				static char temp[32];
+				Format(temp, sizeof temp, "OnUser4 !self:Kill::%f:-1", time);
+				SetVariantString(temp);
+				AcceptEntityInput(entity, "AddOutput");
+				AcceptEntityInput(entity, "FireUser4");
 			}
 		}
 	}
